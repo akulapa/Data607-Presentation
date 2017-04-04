@@ -1,0 +1,277 @@
+---
+title: "Presentation-607"
+author: "Pavan Akula"
+date: "March 26, 2017"
+output: html_document
+---
+```{r}
+library(pdftools)
+library(dplyr)
+library(stringr)
+library(tidyr)
+library(RMySQL)
+
+
+#Get data from PDF file
+pdf.raw.data <- lapply("D:/CUNY/607/Presentation/February 2014 - Smithsonian Science/Feb_2014_Views_Future_Crosstab.pdf", pdf_text)
+
+#Only intrested in analysing only 3 rows
+pdf.raw.data <- pdf.raw.data[[1]]
+pdf.raw.data <- pdf.raw.data[1:3]
+
+#Tidy data
+pattern="\\r\\n"
+pdf.raw.data <- gsub(pattern = pattern, replacement = "|", pdf.raw.data)
+
+#Remove tabs
+pattern="\\tab"
+pdf.raw.data <- gsub(pattern = pattern, replacement = "", pdf.raw.data)
+
+#Remove extra spaces
+pattern="\\s+"
+pdf.raw.data <- gsub(pattern = pattern, replacement = " ", pdf.raw.data)
+
+#Create MySQL Connection
+dbHandle <- dbConnect(MySQL(), user="root", pwd = "", database = "model2", host="localhost", port=3306)
+
+#delete froms
+query <- "delete from model2.question"
+dbSendQuery(dbHandle, query)
+
+#Process each question
+for (i in 1:length(pdf.raw.data)){
+  rm(pdf.raw.temp)
+  rm(pdf.question)
+  rm(pdf.answers)
+  
+  pdf.raw.temp <- pdf.raw.data[i]
+  
+  #Convert each question into rows
+  pdf.raw.temp <- strsplit(as.character(unlist(pdf.raw.temp)), "\\|", fixed = F)
+  
+  #Convert raw question data into data frame
+  pdf.raw.temp <- data.frame(pdf.raw.temp, stringsAsFactors = F, replace = T)
+  
+  #Rename the column name
+  names(pdf.raw.temp)[1]<-"plainText"
+  
+  #Add row numbers
+  pdf.raw.temp <- pdf.raw.temp %>% 
+  mutate(id = row_number())
+  
+  #Get the question
+  pdf.question <- data.frame(pdf.raw.temp %>% filter(id %in% c(4:6)) %>% select (plainText), stringsAsFactors = F, replace = T)
+  pdf.question <- paste(pdf.question[,1], collapse = " ")
+  
+  #Insert question into MySQL
+  query <- paste("INSERT INTO model2.question(questionDesc,idQuestion) VALUES('", pdf.question, "',", i, ")")
+  dbSendQuery(dbHandle, query)
+  
+  #Get the response details
+  pdf.answers <- data.frame(unlist(pdf.raw.temp$plainText[13:26]), stringsAsFactors = F, replace = T)
+  
+  #Rename the column name
+  names(pdf.answers)[1]<-"plainText"
+
+  #Apply values for percentages
+  pdf.answers$plainText[grep("Mostly better", pdf.answers$plainText) + 1] <- paste("101",pdf.answers$plainText[grep("Mostly better", pdf.answers$plainText) + 1],sep = " ")
+
+  pdf.answers$plainText[grep("Mostly worse", pdf.answers$plainText) + 1] <- paste("102",pdf.answers$plainText[grep("Mostly worse", pdf.answers$plainText) + 1],sep = " ")
+
+  pdf.answers$plainText[grep("know", pdf.answers$plainText) + 1] <- paste("103",pdf.answers$plainText[grep("know", pdf.answers$plainText) + 1],sep = " ")
+  
+  pdf.answers$plainText[grep("Refused", pdf.answers$plainText) + 1] <- paste("104",pdf.answers$plainText[grep("Refused", pdf.answers$plainText) + 1],sep = " ")
+
+  #Trim the data
+  pdf.answers$plainText <- str_trim(pdf.answers$plainText)
+ 
+  #Get required data
+  pdf.answers.temp <- data.frame(pdf.answers %>% filter(grepl("Mostly", plainText, fixed = TRUE)), stringsAsFactors = F)
+  pdf.answers.temp <- rbind(pdf.answers.temp, data.frame(pdf.answers %>% filter(grepl("know", plainText, fixed = TRUE)), stringsAsFactors = F))
+  pdf.answers.temp <- rbind(pdf.answers.temp, data.frame(pdf.answers %>% filter(grepl("Refused", plainText, fixed = TRUE)), stringsAsFactors = F))
+  
+  pdf.answers.temp$plainText <- str_replace_all(pdf.answers.temp[,1],"Mostly better","1")
+  pdf.answers.temp$plainText  <- str_replace_all(pdf.answers.temp[,1],"Mostly worse","2")
+  pdf.answers.temp$plainText  <- str_replace_all(pdf.answers.temp[,1],"Refused \\(VOL\\.\\)","4")
+  pdf.answers.temp$plainText  <- str_replace_all(pdf.answers.temp[,1],"-","0")
+  pdf.answers.temp$plainText  <- str_replace_all(pdf.answers.temp[,1],"\\*","0")
+  pdf.answers.temp$plainText  <- str_replace_all(pdf.answers.temp[,1],"[^[:digit:]\\s]","3")
+  pdf.answers.temp$plainText  <- str_replace_all(pdf.answers.temp[,1],"33333 3333 333333","3")
+  
+  pdf.answers.temp <- rbind(pdf.answers.temp, pdf.answers %>% filter(grepl("%", plainText, fixed = TRUE)))
+  
+  pdf.answers.temp$plainText <- str_replace_all(pdf.answers.temp[,1],"-","0")
+  pdf.answers.temp$plainText <- str_replace_all(pdf.answers.temp[,1],"\\*","0")
+  pdf.answers.temp$plainText <- str_replace_all(pdf.answers.temp[,1],"\\s+"," ")
+  
+  pdf.answers.final <- data.frame(str_split_fixed(pdf.answers.temp$plainText, "\\s", 27), stringsAsFactors = F)
+
+  temp1 <- pdf.answers.final %>% filter(X1=="1") %>% select (1:27)
+  temp2 <- pdf.answers.final %>% filter(X1=="101") %>% select (1:27)
+  j = 2
+  for(k in 2:26){
+    tempx <-temp1 %>% filter(X1=="1") %>% select (k)
+    tempy <-temp2 %>% filter(X1=="101") %>% select (j)
+    if (tempx=="0"){
+      pdf.answers.final[pdf.answers.final$X1 == "101", k] <- "0%"
+    }
+    else{
+      pdf.answers.final[pdf.answers.final$X1 == "101", k] <- tempy
+      j = j + 1
+    }
+  }
+
+  temp1 <- pdf.answers.final %>% filter(X1=="2") %>% select (1:27)
+  temp2 <- pdf.answers.final %>% filter(X1=="102") %>% select (1:27)
+  j = 2
+  for(k in 2:26){
+    tempx <-temp1 %>% filter(X1=="2") %>% select (k)
+    tempy <-temp2 %>% filter(X1=="102") %>% select (j)
+    if (tempx=="0"){
+      pdf.answers.final[pdf.answers.final$X1 == "102", k] <- "0%"
+    }
+    else{
+      pdf.answers.final[pdf.answers.final$X1 == "102", k] <- tempy
+      j = j + 1
+    }
+  }
+
+  temp1 <- pdf.answers.final %>% filter(X1=="3") %>% select (1:27)
+  temp2 <- pdf.answers.final %>% filter(X1=="103") %>% select (1:27)
+  j = 2
+  for(k in 2:26){
+    tempx <-temp1 %>% filter(X1=="3") %>% select (k)
+    tempy <-temp2 %>% filter(X1=="103") %>% select (j)
+    if (tempx=="0"){
+      pdf.answers.final[pdf.answers.final$X1 == "103", k] <- "0%"
+    }
+    else{
+      pdf.answers.final[pdf.answers.final$X1 == "103", k] <- tempy
+      j = j + 1
+    }
+  }
+  
+  temp1 <- pdf.answers.final %>% filter(X1=="4") %>% select (1:27)
+  temp2 <- pdf.answers.final %>% filter(X1=="104") %>% select (1:27)
+  j = 2
+  for(k in 2:26){
+    tempx <-temp1 %>% filter(X1=="4") %>% select (k)
+    tempy <-temp2 %>% filter(X1=="104") %>% select (j)
+    if (tempx=="0"){
+      pdf.answers.final[pdf.answers.final$X1 == "104", k] <- "0%"
+    }
+    else{
+      pdf.answers.final[pdf.answers.final$X1 == "104", k] <- tempy
+      j = j + 1
+    }
+  }
+  
+  pdf.answers.final$idQuestion <- i
+  pdf.answers.final$X26 <- NULL
+  pdf.answers.final$X27 <- NULL
+  
+  if (i==1){
+    pdf.question.answers.all <- pdf.answers.final
+  }
+  else{
+    pdf.question.answers.all <- rbind(pdf.question.answers.all, pdf.answers.final)
+  }
+}
+
+#Convert columns to rows
+pdf.answers.normal.form <- pdf.question.answers.all %>% 
+  gather(Groups, Count, X2:X25, na.rm = FALSE)
+  
+  
+pdf.answers.normal.form$Category <- NA
+pdf.answers.normal.form$Category[pdf.answers.normal.form$Groups %in% c("X2","X3","X4")] <- "Gender"
+pdf.answers.normal.form$Category[pdf.answers.normal.form$Groups %in% c("X5","X6","X7")] <- "Race-Ethnicity"
+pdf.answers.normal.form$Category[pdf.answers.normal.form$Groups %in% c("X8","X9","X10","X11")] <- "Age"
+pdf.answers.normal.form$Category[pdf.answers.normal.form$Groups %in% c("X12","X13","X14")] <- "Education"
+pdf.answers.normal.form$Category[pdf.answers.normal.form$Groups %in% c("X15","X16","X17","X18")] <- "Income"
+pdf.answers.normal.form$Category[pdf.answers.normal.form$Groups %in% c("X19","X20","X21")] <- "Political Party"
+pdf.answers.normal.form$Category[pdf.answers.normal.form$Groups %in% c("X22","X23","X24","X25")] <- "Region"
+
+names(pdf.answers.normal.form)[1]<-"Answer"
+pdf.answers.normal.form$Groups[pdf.answers.normal.form$Groups == "X2"] <- "TotalObs"
+pdf.answers.normal.form$Groups[pdf.answers.normal.form$Groups == "X3"] <- "Male"
+pdf.answers.normal.form$Groups[pdf.answers.normal.form$Groups == "X4"] <- "Female"
+pdf.answers.normal.form$Groups[pdf.answers.normal.form$Groups == "X5"] <- "White Non-Hispanic"
+pdf.answers.normal.form$Groups[pdf.answers.normal.form$Groups == "X6"] <- "Black Non-Hispanic"
+pdf.answers.normal.form$Groups[pdf.answers.normal.form$Groups == "X7"] <- "Non-White Including Hispanic"
+pdf.answers.normal.form$Groups[pdf.answers.normal.form$Groups == "X8"] <- "Age between 18-29 years"
+pdf.answers.normal.form$Groups[pdf.answers.normal.form$Groups == "X9"] <- "Age between 30-49 years"
+pdf.answers.normal.form$Groups[pdf.answers.normal.form$Groups == "X10"] <- "Age between 50-64 years"
+pdf.answers.normal.form$Groups[pdf.answers.normal.form$Groups == "X11"] <- "Age 65 and above"
+pdf.answers.normal.form$Groups[pdf.answers.normal.form$Groups == "X12"] <- "College Graduate"
+pdf.answers.normal.form$Groups[pdf.answers.normal.form$Groups == "X13"] <- "Some College"
+pdf.answers.normal.form$Groups[pdf.answers.normal.form$Groups == "X14"] <- "HS or Less"
+pdf.answers.normal.form$Groups[pdf.answers.normal.form$Groups == "X15"] <- "Income 75K and above"
+pdf.answers.normal.form$Groups[pdf.answers.normal.form$Groups == "X16"] <- "Income between 50K-$74.9K"
+pdf.answers.normal.form$Groups[pdf.answers.normal.form$Groups == "X17"] <- "Income between 30K-$49.9K"
+pdf.answers.normal.form$Groups[pdf.answers.normal.form$Groups == "X18"] <- "Income under 30K"
+pdf.answers.normal.form$Groups[pdf.answers.normal.form$Groups == "X19"] <- "Democrat"
+pdf.answers.normal.form$Groups[pdf.answers.normal.form$Groups == "X20"] <- "Republican"
+pdf.answers.normal.form$Groups[pdf.answers.normal.form$Groups == "X21"] <- "Independent"
+pdf.answers.normal.form$Groups[pdf.answers.normal.form$Groups == "X22"] <- "North-East"
+pdf.answers.normal.form$Groups[pdf.answers.normal.form$Groups == "X23"] <- "Mid-West"
+pdf.answers.normal.form$Groups[pdf.answers.normal.form$Groups == "X24"] <- "South"
+pdf.answers.normal.form$Groups[pdf.answers.normal.form$Groups == "X25"] <- "West"
+
+pdf.answers.normal.form$Answer <- as.numeric(pdf.answers.normal.form$Answer)
+
+# Answer
+query <- "delete from model2.answer"
+dbSendQuery(dbHandle, query)
+query <- "INSERT INTO model2.answer(idAnswer,answerDesc) VALUES(1,'Mostly better')"
+dbSendQuery(dbHandle, query)
+query <- "INSERT INTO model2.answer(idAnswer,answerDesc) VALUES(2,'Mostly worse')"
+dbSendQuery(dbHandle, query)
+query <- "INSERT INTO model2.answer(idAnswer,answerDesc) VALUES(3,'Do not know')"
+dbSendQuery(dbHandle, query)
+query <- "INSERT INTO model2.answer(idAnswer,answerDesc) VALUES(4,'Refused to answer')"
+dbSendQuery(dbHandle, query)
+#query <- "INSERT INTO model2.answer(idAnswer,answerDesc) VALUES(101,'Mostly better percentage')"
+#dbSendQuery(dbHandle, query)
+#query <- "INSERT INTO model2.answer(idAnswer,answerDesc) VALUES(102,'Mostly worse percentage')"
+#dbSendQuery(dbHandle, query)
+#query <- "INSERT INTO model2.answer(idAnswer,answerDesc) VALUES(103,'Do not know percentage')"
+#dbSendQuery(dbHandle, query)
+#query <- "INSERT INTO model2.answer(idAnswer,answerDesc) VALUES(104,'Refused to answer percentage')"
+#dbSendQuery(dbHandle, query)
+
+
+# Survey Fact
+db.Survey.Fact <- pdf.answers.normal.form %>% mutate (idSurvey_Fact = row_number()) %>% filter(Answer<100) %>% select (idSurvey_Fact, idQuestion, Answer, Groups, Category, Count = as.numeric(Count))
+
+db.Survey.Fact <- pdf.answers.normal.form %>% mutate(iAns = Answer - 100) %>% filter(Answer>100) %>% select ( idQuestion, Answer, Percentage=Count, iAns, Groups) %>% inner_join(db.Survey.Fact, by = c("Groups" = "Groups", "idQuestion"="idQuestion", "iAns"="Answer")) %>% select (idSurvey_Fact, idQuestion, iAns, Groups, Category, Count, Percentage)
+
+db.Survey.Fact$Percentage = ifelse(db.Survey.Fact$Count > 0, ifelse(db.Survey.Fact$Percentage != "0%", db.Survey.Fact$Percentage, "<1%"), db.Survey.Fact$Percentage)
+
+# Category
+db.frame.data <- db.Survey.Fact %>% distinct(Category) %>% mutate (idCategory = row_number()) %>% select (idCategory,Category)
+query <- "delete from model2.category"
+dbSendQuery(dbHandle, query)
+for (l in 1:nrow(db.frame.data)){
+  query <- paste("INSERT INTO model2.category(idCategory,categoryDesc) VALUES(", db.frame.data$idCategory[l], ",'", db.frame.data$Category[l],"')",sep="")
+  dbSendQuery(dbHandle, query)
+}
+
+# Section
+db.frame.data <- db.Survey.Fact %>% distinct(Groups) %>% mutate (idSection = row_number()) %>% select (idSection,Groups) %>% inner_join(db.Survey.Fact, by = "Groups") %>% distinct(idSection,Groups,Category) %>% select(idSection,Groups,Category) %>% inner_join(db.frame.data, by = "Category") %>% select(idSection,Groups,idCategory)
+query <- "delete from model2.section"
+dbSendQuery(dbHandle, query)
+for (l in 1:nrow(db.frame.data)){
+  query <- paste("INSERT INTO model2.section(idCategory,idSection, sectionDesc) VALUES(", db.frame.data$idCategory[l],",", db.frame.data$idSection[l], ",'", db.frame.data$Groups[l],"')",sep="")
+  dbSendQuery(dbHandle, query)
+}
+
+#Fact table
+db.frame.data <- db.Survey.Fact %>% inner_join(db.frame.data, by = "Groups") %>% select (idSurvey_Fact, idQuestion, iAns, idSection, Count, Percentage)
+query <- "delete from model2.survey_fact"
+dbSendQuery(dbHandle, query)
+for (l in 1:nrow(db.frame.data)){
+  query <- paste("INSERT INTO model2.survey_fact (idSurvey_Fact, idQuestion, idAnswer, idSection, response_count,response_percentage) VALUES(", db.frame.data$idSurvey_Fact[l], ",", db.frame.data$idQuestion[l], ",", db.frame.data$iAns[l], ",", db.frame.data$idSection[l], ",", db.frame.data$Count[l], ",'", db.frame.data$Percentage[l],"')",sep="")
+  dbSendQuery(dbHandle, query)
+}
+```
